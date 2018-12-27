@@ -446,6 +446,8 @@ def map_workload(target_data):
     unique_workloads = pipeline_data.values_list('workload', flat=True).distinct()
     assert len(unique_workloads) > 0
     workload_data = {}
+    #*** initializing counter -- New Counter
+    label = 0
     for unique_workload in unique_workloads:
         # Load knob & metric data for this workload
         knob_data = load_data_helper(pipeline_data, unique_workload, PipelineTaskType.KNOB_DATA)
@@ -482,16 +484,29 @@ def map_workload(target_data):
         X_matrix, y_matrix, rowlabels = DataUtil.combine_duplicate_rows(
             X_matrix, y_matrix, rowlabels)
 
+        #*** creating new matrix and adding labels to existing workload_data -- Labels Add
+        rows, column = y_matrix.shape
+        labels = np.full((rows,1), label, dtype=int)
         workload_data[unique_workload] = {
             'X_matrix': X_matrix,
             'y_matrix': y_matrix,
             'rowlabels': rowlabels,
+            'label': labels,
         }
+        label += 1
 
+    # Stack all X & y matrices for preprocessing
     # Stack all X & y matrices for preprocessing
     Xs = np.vstack([entry['X_matrix'] for entry in list(workload_data.values())])
     ys = np.vstack([entry['y_matrix'] for entry in list(workload_data.values())])
 
+    #*** concatinating arrays and creating fetching labels -- New data fetch and process
+    labels = np.vstack([entry['label'] for entry in list(workload_data.values())])
+    Zs = np.concatenate((Xs, ys), axis=1)
+    print("Zs = ", Zs)
+    print("Shape = ",Zs.shape)
+    print("Labels = ",labels)
+    print("Labels Shape = ",labels.shape)
     # Scale the X & y values, then compute the deciles for each column in y
     X_scaler = StandardScaler(copy=False)
     X_scaler.fit(Xs)
@@ -547,4 +562,5 @@ def map_workload(target_data):
             best_workload_id = workload_id
     target_data['mapped_workload'] = (best_workload_id, best_score)
     target_data['scores'] = scores
+    TEST()
     return target_data
