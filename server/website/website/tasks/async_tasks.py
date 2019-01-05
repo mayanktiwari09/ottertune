@@ -13,9 +13,9 @@ from djcelery.models import TaskMeta
 from sklearn.preprocessing import StandardScaler
 
 from analysis.gp import GPRNP
+from analysis.W_M import W_M
 from analysis.gp_tf import GPRGD
-from analysis.preprocessing import Bin, DummyEncoder
-from analysis.constraints import ParamConstraintHelper
+from analysis.preprocessing import Bin
 from website.models import PipelineData, PipelineRun, Result, Workload, KnobCatalog, MetricCatalog
 from website.parser import Parser
 from website.types import PipelineTaskType
@@ -26,7 +26,6 @@ from website.settings import (DEFAULT_LENGTH_SCALE, DEFAULT_MAGNITUDE,
                               DEFAULT_RIDGE, DEFAULT_LEARNING_RATE,
                               DEFAULT_EPSILON, MAX_ITER, GPR_EPS,
                               DEFAULT_SIGMA_MULTIPLIER, DEFAULT_MU_MULTIPLIER)
-from website.settings import INIT_FLIP_PROB, FLIP_PROB_DECAY
 from website.types import VarType
 
 LOG = get_task_logger(__name__)
@@ -255,23 +254,8 @@ def configuration_recommendation(target_data):
     y_workload = y_workload[dups_filter, :]
     rowlabels_workload = rowlabels_workload[dups_filter]
 
-    # Combine target & workload Xs for preprocessing
+    # Combine target & workload Xs then scale
     X_matrix = np.vstack([X_target, X_workload])
-
-    # Dummy encode categorial variables
-    categorical_info = DataUtil.dummy_encoder_helper(X_columnlabels,
-                                                     mapped_workload.dbms)
-    dummy_encoder = DummyEncoder(categorical_info['n_values'],
-                                 categorical_info['categorical_features'],
-                                 categorical_info['cat_columnlabels'],
-                                 categorical_info['noncat_columnlabels'])
-    X_matrix = dummy_encoder.fit_transform(X_matrix)
-
-    # below two variables are needed for correctly determing max/min on dummies
-    binary_index_set = set(categorical_info['binary_vars'])
-    total_dummies = dummy_encoder.total_dummies()
-
-    # Scale to N(0, 1)
     X_scaler = StandardScaler()
     X_scaled = X_scaler.fit_transform(X_matrix)
     if y_target.shape[0] < 5:  # FIXME
@@ -295,13 +279,6 @@ def configuration_recommendation(target_data):
             y_target_scaler = None
             y_workload_scaler = StandardScaler()
             y_scaled = y_workload_scaler.fit_transform(y_target)
-
-    # Set up constraint helper
-    constraint_helper = ParamConstraintHelper(scaler=X_scaler,
-                                              encoder=dummy_encoder,
-                                              binary_vars=categorical_info['binary_vars'],
-                                              init_flip_prob=INIT_FLIP_PROB,
-                                              flip_prob_decay=FLIP_PROB_DECAY)
 
     # FIXME (dva): check if these are good values for the ridge
     # ridge = np.empty(X_scaled.shape[0])
@@ -327,26 +304,21 @@ def configuration_recommendation(target_data):
         X_default[i] = k.default
 
     X_default_scaled = X_scaler.transform(X_default.reshape(1, X_default.shape[0]))[0]
-
-    # Determine min/max for knob values
     for i in range(X_scaled.shape[1]):
-        if i < total_dummies or i in binary_index_set:
-            col_min = 0
-            col_max = 1
-        else:
-            col_min = X_scaled[:, i].min()
-            col_max = X_scaled[:, i].max()
-            if X_columnlabels[i] in knobs_mem_catalog:
-                X_mem[0][i] = mem_max * 1024 * 1024 * 1024  # mem_max GB
-                col_max = X_scaler.transform(X_mem)[0][i]
+        col_min = X_scaled[:, i].min()
+        col_max = X_scaled[:, i].max()
+        if X_columnlabels[i] in knobs_mem_catalog:
+            X_mem[0][i] = mem_max * 1024 * 1024 * 1024  # mem_max GB
+            col_max = X_scaler.transform(X_mem)[0][i]
 
-            # Set min value to the default value
-            # FIXME: support multiple methods can be selected by users
-            col_min = X_default_scaled[i]
+        # Set min value to the default value
+        # FIXME: support multiple methods can be selected by users
+        col_min = X_default_scaled[i]
 
         X_min[i] = col_min
         X_max[i] = col_max
-        X_samples[:, i] = np.random.rand(num_samples) * (col_max - col_min) + col_min
+        X_samples[:, i] = np.random.rand(
+            num_samples) * (col_max - col_min) + col_min
 
     # Maximize the throughput, moreisbetter
     # Use gradient descent to minimize -throughput
@@ -380,13 +352,11 @@ def configuration_recommendation(target_data):
                   sigma_multiplier=DEFAULT_SIGMA_MULTIPLIER,
                   mu_multiplier=DEFAULT_MU_MULTIPLIER)
     model.fit(X_scaled, y_scaled, X_min, X_max, ridge=DEFAULT_RIDGE)
-    res = model.predict(X_samples, constraint_helper=constraint_helper)
+    res = model.predict(X_samples)
 
     best_config_idx = np.argmin(res.minl.ravel())
     best_config = res.minl_conf[best_config_idx, :]
     best_config = X_scaler.inverse_transform(best_config)
-    # Decode one-hot encoding into categorical knobs
-    best_config = dummy_encoder.inverse_transform(best_config)
 
     # Although we have max/min limits in the GPRGD training session, it may
     # lose some precisions. e.g. 0.99..99 >= 1.0 may be True on the scaled data,
@@ -446,7 +416,6 @@ def map_workload(target_data):
     unique_workloads = pipeline_data.values_list('workload', flat=True).distinct()
     assert len(unique_workloads) > 0
     workload_data = {}
-    #*** initializing counter -- New Counter
     label = 0
     for unique_workload in unique_workloads:
         # Load knob & metric data for this workload
@@ -483,8 +452,6 @@ def map_workload(target_data):
         # Combine duplicate rows (rows with same knob settings)
         X_matrix, y_matrix, rowlabels = DataUtil.combine_duplicate_rows(
             X_matrix, y_matrix, rowlabels)
-
-        #*** creating new matrix and adding labels to existing workload_data -- Labels Add
         rows, column = y_matrix.shape
         labels = np.full((rows,1), label, dtype=int)
         workload_data[unique_workload] = {
@@ -494,19 +461,11 @@ def map_workload(target_data):
             'label': labels,
         }
         label += 1
-
-    # Stack all X & y matrices for preprocessing
     # Stack all X & y matrices for preprocessing
     Xs = np.vstack([entry['X_matrix'] for entry in list(workload_data.values())])
     ys = np.vstack([entry['y_matrix'] for entry in list(workload_data.values())])
-
-    #*** concatinating arrays and creating fetching labels -- New data fetch and process
     labels = np.vstack([entry['label'] for entry in list(workload_data.values())])
     Zs = np.concatenate((Xs, ys), axis=1)
-    print("Zs = ", Zs)
-    print("Shape = ",Zs.shape)
-    print("Labels = ",labels)
-    print("Labels Shape = ",labels.shape)
     # Scale the X & y values, then compute the deciles for each column in y
     X_scaler = StandardScaler(copy=False)
     X_scaler.fit(Xs)
@@ -516,6 +475,9 @@ def map_workload(target_data):
     y_binner.fit(ys)
     del Xs
     del ys
+    Z_scaler = StandardScaler(copy=False)
+    Z_scaler.fit_transform(Zs)
+
 
     # Filter the target's X & y data by the ranked knobs & pruned metrics.
     X_target = target_data['X_matrix'][:, ranked_knob_idxs]
@@ -562,5 +524,5 @@ def map_workload(target_data):
             best_workload_id = workload_id
     target_data['mapped_workload'] = (best_workload_id, best_score)
     target_data['scores'] = scores
-    TEST()
+    W_M().fit(Zs, labels)
     return target_data
