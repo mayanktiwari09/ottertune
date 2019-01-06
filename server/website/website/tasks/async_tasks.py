@@ -446,8 +446,8 @@ def map_workload(target_data):
             initialized = True
 
         # Filter X & y matrices by top ranked_knobs & pruned_metrics
-        X_matrix = X_matrix[:, ranked_knob_idxs]
-        y_matrix = y_matrix[:, pruned_metric_idxs]
+        #X_matrix = X_matrix[:, ranked_knob_idxs]
+        #y_matrix = y_matrix[:, pruned_metric_idxs]
 
         # Combine duplicate rows (rows with same knob settings)
         X_matrix, y_matrix, rowlabels = DataUtil.combine_duplicate_rows(
@@ -463,9 +463,12 @@ def map_workload(target_data):
         label += 1
     # Stack all X & y matrices for preprocessing
     Xs = np.vstack([entry['X_matrix'] for entry in list(workload_data.values())])
+    print(Xs.shape)
     ys = np.vstack([entry['y_matrix'] for entry in list(workload_data.values())])
+    print(ys.shape)
     labels = np.vstack([entry['label'] for entry in list(workload_data.values())])
     Zs = np.concatenate((Xs, ys), axis=1)
+    print(Zs.shape)
     # Scale the X & y values, then compute the deciles for each column in y
     X_scaler = StandardScaler(copy=False)
     X_scaler.fit(Xs)
@@ -480,9 +483,16 @@ def map_workload(target_data):
 
 
     # Filter the target's X & y data by the ranked knobs & pruned metrics.
-    X_target = target_data['X_matrix'][:, ranked_knob_idxs]
-    y_target = target_data['y_matrix'][:, pruned_metric_idxs]
-
+    #X_target = target_data['X_matrix'][:, ranked_knob_idxs]
+    #y_target = target_data['y_matrix'][:, pruned_metric_idxs]
+    X_target = target_data['X_matrix']
+    y_target = target_data['y_matrix']
+    Xx_target = np.array(X_target)
+    yy_target = np.array(y_target)
+    test = np.concatenate((X_target, y_target), axis=1)
+    #print(test)
+    print(test.shape)
+    test = Z_scaler.transform(test)
     # Now standardize the target's data and bin it by the deciles we just
     # calculated
     X_target = X_scaler.transform(X_target)
@@ -524,5 +534,7 @@ def map_workload(target_data):
             best_workload_id = workload_id
     target_data['mapped_workload'] = (best_workload_id, best_score)
     target_data['scores'] = scores
-    W_M().fit(Zs, labels)
+    new_mapper = W_M()
+    new_mapper.fit(Zs,labels)
+    new_mapper.predict(test)
     return target_data
